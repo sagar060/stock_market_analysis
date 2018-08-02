@@ -1,0 +1,488 @@
+---
+title: "Stock Market Analysis"
+author: "Sagar Chettiyar and Bhakti Sangoi"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+#Required Packages
+##Data Manipulation Packages
+```{r}
+library("tidyverse")
+library("dplyr")
+library("lubridate")
+library("splitstackshape")
+```
+
+##Graphic Packages
+```{r}
+library("ggthemes")
+library("highcharter")
+library("ggplot2")
+library("plotly")
+```
+
+##SQLlite Package
+```{r}
+library("RSQLite")
+```
+
+##Finance Package
+```{r}
+library("quantmod")
+```
+
+##Forecasting Packages
+```{r}
+library("tseries")
+library("StanHeaders")
+library("rstan")
+library("prophet")
+library("forecast")
+library("TSPred")
+```
+
+#DATA COLLECTION
+```{r}
+Company_Info<-read_csv("Comapny_Information.csv")
+Annual_Balance_Info<-read_csv("Annual_Balance_Sheet.csv")
+Daily_Stock_Info<-read_csv("Daily_Stock_Prices.csv")
+```
+
+#DATA CLEANING
+
+##For Company Info
+```{r}
+#Splitting the address into City and State
+Company_Info<-cSplit(Company_Info, "Address of Headquarters", ",", fixed = FALSE)
+
+#Dropping unwanted columns
+Company_Info$`SEC filings`<-NULL
+Company_Info$`Address of Headquarters_3`<-NULL
+
+#Renaming the dataset for better understanding
+names(Company_Info)<-c("Ticker_Symbol",
+                       "Company_Name",
+                       "GICS_Sector",
+                       "GICS_Major_Industry",
+                       "Date_Added",
+                       "CIK",
+                       "City",
+                       "State")
+
+#Filling Missing values
+#Replacing the NA's in date column with a default date:"1999-01-01"
+Company_Info$Date_Added[is.na(Company_Info$Date_Added)] <- "1999-01-01"
+
+#Replacing IT with Information Technology in GICS Sector
+Company_Info$GICS_Sector[Company_Info$GICS_Sector=="IT"] <- "Information Technology"
+```
+
+##For Daily_Stock_Info
+```{r}
+#Renaming the dataset for better understanding
+names(Daily_Stock_Info)<-c("Date",
+                           "Ticker_Symbol",
+                           "Open_Price",
+                           "Close_Price",
+                           "Lowest_Price",
+                           "Highest_Price",
+                           "Volume")
+
+#Subsetting date column to keep only dates
+Daily_Stock_Info_Table<-Daily_Stock_Info #Backing up the dataframe for SQL Use
+#Factorizing Dates
+Daily_Stock_Info$Date<-as.Date(Daily_Stock_Info$Date, "%m/%d/%Y") #Reformatting Date
+Daily_Stock_Info$Day<-factor(day(as.POSIXlt(Daily_Stock_Info$Date, format="%m/%d/%Y"))) #Adding a Day column representing the no. of day of the month
+Daily_Stock_Info$Month<-factor(month(as.POSIXlt(Daily_Stock_Info$Date, format="%m/%d/%Y"))) #Adding a Month column representing the Month in Numbers
+Daily_Stock_Info$Year<-factor(year(as.POSIXlt(Daily_Stock_Info$Date, format="%m/%d/%Y"))) #Seperating the Year from the date field
+Daily_Stock_Info$Weekday<-factor(wday(as.POSIXlt(Daily_Stock_Info$Date, format="%m/%d/%Y"))) #Adding a weekday column representing the day of the week
+
+#Creating new dataframes for future analysis
+Volume_Year<-Daily_Stock_Info %>% 
+  filter(Year %in% c("2012","2013","2014","2015","2016")) %>% 
+  group_by(Year) %>% 
+  summarise(Total = n())
+#This dataframe contains volume of stocks traded by  Year
+
+Volume_Month<-Daily_Stock_Info %>% 
+          group_by(Month) %>% 
+          summarise(Total = n())
+Month<-c("Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec") #Assigning month names instead of month numbers
+Volume_Month$Month<-Month[Volume_Month$Month]
+#This dataframe contains volume of stocks traded by Month
+
+Volume_YearMonth<-Daily_Stock_Info %>% 
+  group_by(Year, Month) %>% 
+  summarise(Total = n())
+#This dataframe contains volume of stocks traded by Month and Year
+
+Volume_Weekday<-Daily_Stock_Info %>% 
+          group_by(Weekday) %>% 
+          summarise(Total = n())
+Weekday<-c("Monday","Tuesday","Wednesday","Thursday","Friday")  #Assigning Weekday names instead of month numbers
+#Note: Saturday and Sunday are not included because the stock market does not remain functional on these days
+Volume_Weekday$Weekday<-Weekday[Volume_Weekday$Weekday]
+#This dataframe contains volume of stocks traded by weekdays
+
+Volume_Day<-Daily_Stock_Info %>% 
+          group_by(Day) %>% 
+          summarise(Total = n())
+#This dataframe contains volume of stocks traded by each day of the month
+```
+
+##For Annual_Balance_Info
+```{r}
+#Renaming the dataset for better understanding
+names(Annual_Balance_Info)<-c("Financial_Year",
+                       "Ticker_Symbol",
+                       "Cash_And_Cash_Equivalents",
+                       "Total_Current_Assets",
+                       "Total_Current_Liabilities",
+                       "Short_Term_Investments",
+                       "Total_Revenue",
+                       "Treasury_Stock",
+                       "Retained_Earnings",
+                       "Operation_Margin",
+                       "Quick_Ratio")
+```
+
+#DATA STORAGE
+```{r}
+#Creating Database Connection
+db_conn <- dbConnect(SQLite(), dbname="Stock_Market.sqlite")
+#dbDisconnect(db_conn)
+
+#Table Creation
+#For Company_Info
+dbGetQuery(db_conn, #Database Connector name
+           "create table Company_Info
+           (
+           Ticker_Symbol Text Primary Key,
+           Company_Name Text,
+           GICS_Sector Text,
+           GICS_Major_Industry Text,
+           Date_Added Date,
+           CIK Text,
+           City Text,
+           State Text
+           )") #Create Table Script
+dbWriteTable(conn = db_conn, #Database Connector name
+             name = "Company_Info", #Table Name
+             value = Company_Info, #Load data from the newly created dataframe
+             append=TRUE,row.names = FALSE,header = TRUE)#Since the CSV contains headers in the columns
+dbListFields(db_conn, "Company_Info") #Listing the field of the table
+
+
+#For Daily_Stock_Info
+dbGetQuery(db_conn, #Database Connector name
+           "create table Daily_Stock_Info
+           (
+           Daily_Stock_ID Integer Primary Key Autoincrement,
+           Date Date,
+           Ticker_Symbol Text,
+           Open_Price Numeric,
+           Close_Price Numeric,
+           Lowest_Price Numeric,
+           Highest_Price Numeric,
+           Volume Real
+           )") #Create Table Script
+dbWriteTable(conn = db_conn, #Database Connector name
+             name = "Daily_Stock_Info", #Table Name
+             value = Daily_Stock_Info_Table, #Load data from the newly created dataframe
+             append=TRUE,row.names = FALSE,header = TRUE)#Since the CSV contains headers in the columns
+dbListFields(db_conn, "Daily_Stock_Info") #Listing the field of the table
+
+#For Annual_Balance_Info
+dbGetQuery(db_conn, #Database Connector name
+           "create table Annual_Balance_Info
+           (
+           Annual_Stock_ID Integer Primary Key Autoincrement,
+           Financial_Year Integer,
+           Ticker_Symbol Text,
+           Cash_And_Cash_Equivalents Numeric,
+           Total_Current_Assets Numeric,
+           Total_Current_Liabilities Numeric,
+           Short_Term_Investments Numeric,
+           Total_Revenue Numeric,
+           Treasury_Stock Numeric,
+           Retained_Earnings Numeric,
+           Operation_Margin Numeric,
+           Quick_Ratio Numeric
+           )") #Create Table Script
+dbWriteTable(conn = db_conn, #Database Connector name
+             name = "Annual_Balance_Info", #Table Name
+             value = Annual_Balance_Info, #Load data from the newly created dataframe
+             append=TRUE,row.names = FALSE,header = TRUE)#Since the CSV contains headers in the columns
+dbListFields(db_conn, "Annual_Balance_Info") #Listing the field of the table
+```
+
+#DATA RETRIEVAL
+#1) Display the companies having current ratio greater than one
+```{r}
+query<-"select a.Ticker_Symbol,c.Company_Name, (a.Total_Current_Assets/a.Total_Current_Liabilities) as Current_Ratio
+        from Annual_Balance_Info a
+        join Company_Info c on a.Ticker_Symbol=c.Ticker_Symbol
+        group by a.Ticker_Symbol,c.Company_Name
+        having (a.Total_Current_Assets/a.Total_Current_Liabilities)>1
+        order by (a.Total_Current_Assets/a.Total_Current_Liabilities) desc
+        limit 10"
+dbGetQuery(db_conn,query) #Calling dbquery to run the query on db_conn and show output
+```
+
+#2)Which state has the highest number of headquarters?
+```{r}
+query<-"select State,count(Ticker_Symbol) as No_Of_Headquarters
+        from Company_Info
+        group by State
+        order by count(Ticker_Symbol) desc
+        limit 5"
+dbGetQuery(db_conn,query) #Calling dbquery to run the query on db_conn and show output
+```
+
+#3)Display all the GICS Sector along with their Total revenue
+```{r}
+query<-"select c.GICS_Sector, sum(a.Total_Revenue) as Total_Revenue
+        from Annual_Balance_Info a
+        join Company_Info c on a.Ticker_Symbol=c.Ticker_Symbol
+        group by c.GICS_Sector
+        order by sum(a.Total_Revenue) desc"
+dbGetQuery(db_conn,query) #Calling dbquery to run the query on db_conn and show output
+```
+
+#4)When was the highest volume of stocks traded? For which company? How much?
+```{r}
+query<-"select d.Date, c.Company_Name, max(d.Volume) as Max_Volume
+        from Daily_Stock_Info d
+        join Company_Info c on d.Ticker_Symbol=c.Ticker_Symbol"
+dbGetQuery(db_conn,query) #Calling dbquery to run the query on db_conn and show output
+```
+
+#5)Which Industry has the highest number of stocks traded?
+```{r}
+query<-"select c.GICS_Sector, count(d.Volume) as No_Of_Stocks_Traded
+        from Daily_Stock_Info d
+        join Company_Info c on d.Ticker_Symbol=c.Ticker_Symbol
+        group by c.GICS_Sector
+        order by count(d.Volume) desc"
+dbGetQuery(db_conn,query) #Calling dbquery to run the query on db_conn and show output
+```
+
+#6)Display the Retained earnings for Industries under Telecommunications Sector?
+```{r}
+query<-"select c.GICS_Major_Industry, sum(a.Retained_Earnings) as Total_Retained_Earnings
+        from Annual_Balance_Info a
+        join Company_Info c on a.Ticker_Symbol=c.Ticker_Symbol
+        group by c.GICS_Major_Industry
+        having c.GICS_Sector='Consumer Discretionary'
+        order by sum(a.Retained_Earnings) desc"
+dbGetQuery(db_conn,query) #Calling dbquery to run the query on db_conn and show output
+```
+
+#DATA ANALYSIS
+#1)What are the Total Current Liabilities and Assets of American Airlines Group?
+```{r}
+#Calculations
+Annual_Info_CR_Ratio<-Annual_Balance_Info %>% 
+                     select(Financial_Year,Ticker_Symbol,Total_Current_Liabilities,Total_Current_Assets)
+Annual_Info_CR_Ratio$Current_Ratio<-Annual_Info_CR_Ratio$Total_Current_Assets/Annual_Info_CR_Ratio$Total_Current_Liabilities #Calculating the Current Ratio for all the stocks
+Annual_Profit<-filter(Annual_Info_CR_Ratio, Current_Ratio>=1) #This dataframe contains all the companies that have higher assets than liabilities
+Annual_Loss<-filter(Annual_Info_CR_Ratio, Current_Ratio<1) #This dataframe contains all the companies that have more liabilities than assets
+
+Annual_Balance_Info$Cash_Ratio<-Annual_Balance_Info$Cash_And_Cash_Equivalents/Annual_Balance_Info$Total_Current_Liabilities #Calculating the Cash Ratio for all the stocks
+
+AAL_Info<-Annual_Info_CR_Ratio %>% 
+    select(Financial_Year,Ticker_Symbol,Total_Current_Liabilities,Total_Current_Assets,Current_Ratio) %>% 
+    filter(Ticker_Symbol=='AAL') #Filtering for American Airlines Group
+AAL_Info
+
+highchart() %>%
+  hc_xAxis(categories = AAL_Info$Financial_Year) %>%
+  hc_title(text = "Total_Current_Liabilites vs Total_Currents_Assets for American Airlines Group from 2012 to 2015") %>% #Title of the graph
+  hc_add_series(
+    name='Total_Current_Liabilities', #Legend
+    color='red',#Color of the line graph
+    data=AAL_Info$Total_Current_Liabilities #Column to Display
+  ) %>%
+  hc_add_series(
+    name='Total_Current_Assets', #Legend
+    color='green', #Color of the line graph
+    data=AAL_Info$Total_Current_Assets #Column to Display
+  )
+```
+
+#2)Plot a graph of how much a company make's on each dollar of sales [Operation Margin].
+```{r}
+Opt_Margin<-Annual_Balance_Info%>%
+  select(Ticker_Symbol,Operation_Margin)%>%
+  arrange(desc(Operation_Margin))%>% #Arranging in descending order 
+  head(n=10)%>% #Selecting top 10 Highest Operation Margin
+  distinct() #Selecting only distinct values as the Ticker_Symbl may repeat because of multiple financial year
+
+hchart(Opt_Margin,'column', hcaes(x = Ticker_Symbol, y = Operation_Margin, color = Operation_Margin)) %>%  #Plot type Column
+  hc_add_theme(hc_theme_flat()) %>%  #Using flat theme for appealing visualization
+  hc_title(text="Top 10 stocks with highest Operation Margin") #Graph Title
+```
+
+#3)Display the top 5 states having higher number of headquarters.
+```{r}
+State_HQ<-Company_Info%>% 
+          select(State)%>%
+          group_by(State)%>%
+          summarise(No_of_HQ = n())%>% #Counting the number of HeadQuarters
+          arrange(desc(No_of_HQ)) #Arranging in descending order [Max No. of HQ on top]
+
+hchart(State_HQ[1:5,],'pie', hcaes(x = State, y = No_of_HQ, color = No_of_HQ)) %>%  #Plot type pie and selecting only top 5 records
+  hc_add_theme(hc_theme_google()) %>%  #Theming for better visualization
+  hc_title(text="Top 5 states having higher number of headquarters") #Graph Title
+```
+
+#4)Volume of Stocks traded by Year and Month[2010-2016]
+```{r}
+Volume_YearMonthPlot<-ggplot(Volume_YearMonth, aes(Year, Month, fill = Total)) + #Using the fill option as the Total for the blocks
+         geom_tile(size = 1, color = "white") + #Setting the size and color of tile
+         theme_classic() + #Theme
+         geom_text(aes(label=Total), color='white') + #Tile labels are the Total Value
+         ggtitle("Volume of Stocks traded by Year and Month[2010-2016]")  #Graph Title
+plot(Volume_YearMonthPlot) 
+```
+
+```{r}
+#5)Volume of Stocks traded by Month
+hchart(Volume_Month,'line', hcaes(x = Month, y = Total, color = Total)) %>% #Line plot
+  hc_title(text = "Volume of Stocks traded by month of the year")  #Title
+```
+
+#6)Volume of Stocks traded by each day of the month
+```{r}
+hchart(Volume_Day,'column', hcaes(x = Day, y = Total, color = Total)) %>%  #Column Plot
+  hc_title(text = "Volume of Stocks traded by each Day of the month") #Title
+```
+
+#7)Volume of Stocks traded by Weekday
+```{r}
+hchart(Volume_Weekday,'line', hcaes(x = Weekday, y = Total, color = Total)) %>%  #Line Plot
+  hc_title(text = "Volume of Stocks traded by Day of the Week") #Title
+```
+
+#8)Display the Total Revenue for Energy,Financials,Information Technology,Health Care,Consumer Staples and Industrials from 2012 to 2015
+```{r}
+query<-"select a.Financial_Year,c.GICS_Sector, sum(a.Total_Revenue) as Total_Revenue
+        from Annual_Balance_Info a
+join Company_Info c on a.Ticker_Symbol=c.Ticker_Symbol
+group by a.Financial_Year,c.GICS_Sector
+order by a.Financial_Year,c.GICS_Sector"
+
+GICS<-dbGetQuery(db_conn,query) #Calling dbquery to run the query on db_conn and show output and storing it for future reference
+GICS<-na.omit(GICS) #Removing Nulls
+GICS<-GICS%>% filter(Financial_Year %in% c("2012","2013","2014","2015")) #Filtering out for the period 2012-2015
+GICS<-GICS%>% filter(GICS_Sector %in% c("Energy",
+                                  "Financials",
+                                  "Information Technology",
+                                  "Health Care",
+                                  "Consumer Staples",
+                                  "Industrials"))
+#Choosing only Top GICS sector for clear visualization
+
+hchart(GICS,'column', hcaes(x = Financial_Year, y = Total_Revenue, group = GICS_Sector)) %>% 
+  hc_add_theme(hc_theme_google()) %>% 
+  hc_plotOptions(column = list(stacking = 'normal')) %>% 
+  hc_legend(align = 'right', float = T)%>% 
+  hc_title(text = "Total Revenue as per GICS Sector for each Financial Year") 
+```
+
+#9) Which companies have more Short Term Investments Due compared to Cash and Cash Equivalents
+```{r}
+query<-"select Ticker_Symbol,Short_Term_Investments,Cash_And_Cash_Equivalents, Short_Term_Investments - Cash_And_Cash_Equivalents
+        from Annual_Balance_Info
+        group by Ticker_Symbol
+        having Short_Term_Investments > Cash_And_Cash_Equivalents and Short_Term_Investments > 0 and Cash_And_Cash_Equivalents > 0
+        order by (Short_Term_Investments - Cash_And_Cash_Equivalents) desc
+        limit 10"
+Loss_Stock<-dbGetQuery(db_conn,query) #Calling dbquery to run the query on db_conn and show output
+
+plot_ly(Loss_Stock, x = Loss_Stock$Ticker_Symbol, y = Loss_Stock$Short_Term_Investments, type = 'bar', name = 'Short Term Investments Due') %>%
+  add_trace(y = Loss_Stock$Cash_And_Cash_Equivalents, name = 'Cash and Cash Equivalents') %>% #Adding another group column for the graph
+  layout(yaxis = list(title = 'Amount in Dollars'), barmode = 'group',title='Comapnies with higher Short Term Investments Due compared to Cash and Cash Equivalents ') #Title for graph
+```
+
+#TIME SERIES ANALYSIS
+```{r}
+#Using quantmod package gathering live data for the following companies
+Google<-getSymbols(Symbols="GOOG", src = "yahoo", auto.assign = FALSE, verbose = TRUE) #Pulls data from Yahoo Finance for Google Stocks
+Amazon<-getSymbols(Symbols="AMZN", src = "yahoo", auto.assign = FALSE, verbose = TRUE) #Pulls data from Yahoo Finance for Amazon Stocks
+Microsoft<-getSymbols(Symbols="MSFT", src = "yahoo", auto.assign = FALSE, verbose = TRUE) #Pulls data from Yahoo Finance for Microsoft Stocks
+Facebook<-getSymbols(Symbols="FB", src = "yahoo", auto.assign = FALSE, verbose = TRUE) #Pulls data from Yahoo Finance for Facebook Stocks
+
+highchart(type="stock") %>% 
+  hc_title(text="Stock Analyses of the major Tech Giants") %>%   
+  hc_add_series(Google) %>% 
+  hc_add_series(Amazon) %>% 
+  hc_add_series(Microsoft) %>% 
+  hc_add_series(Facebook,type="ohlc")
+```
+
+#FORECASTING
+##Prophet(Forecasting the Volume of Stocks)
+```{r}
+#Step1:Collect Data
+Volume_Date<-Daily_Stock_Info %>% 
+             group_by(Date) %>%  #Grouping data by date
+             summarise(Total = n()) #Volume of stocks
+
+#Step2:Calculate the logarithmic parameter
+names(Volume_Date)<-c("ds","y")
+Volume_Date<-Volume_Date %>%
+             mutate(y = log(y))
+Volume_Prophet<-prophet(Volume_Date)
+
+#Step3:Forecasting
+Future<-make_future_dataframe(Volume_Prophet,periods = 730) #Period = 730 because we are forecastig it for two years
+Forecast_Prophet<-predict(Volume_Prophet,Future)
+plot(Volume_Prophet,Forecast_Prophet,ylab="Volume of stocks",xlab="Year") #Plotting a graph for the Volume of stocks with Year
+prophet_plot_components(Volume_Prophet,Forecast_Prophet) #Plotting other forecasting components such as trends, weekly and yearly
+```
+
+##ARIMA Model(Forecasting the High Price of Stocks)
+```{r}
+#Step1:Prepare Data
+Volume_Date_ARIMA<-Daily_Stock_Info %>% 
+  group_by(Date) %>%  #Grouping data by date
+  summarise(Total = n()) #Volume of stocks
+
+#Step2:Creating Time Series
+Volume_Date_ARIMA = ts(na.omit(Volume_Date_ARIMA$Total), start=c(2016,1), end=c(2018,12),frequency=24) #Preparing time series
+plot(Volume_Date_ARIMA)#Plot of the High Price of the stocks
+
+#Step3:Decomposing the Data
+Decomp = stl(Volume_Date_ARIMA, s.window="periodic") #STL is a flexible function for decomposing and forecasting the series. 
+Deseasonal<-seasadj(Decomp) #Returns seasonally adjusted data constructed by removing the seasonal component.
+plot(Decomp)
+
+#Step4:Stationary
+adf.test(Volume_Date_ARIMA,alternative="stationary") #ADF procedure tests whether the change in Y can be explained by lagged value and a linear trend.
+
+#Step5:Autocorrelations and Choosing Model Order
+Differenced_Series = diff(Deseasonal,differences = 1)
+plot(Differenced_Series)
+adf.test(Differenced_Series,alternative="stationary")
+
+acf(Differenced_Series,main='ACF for Differenced Series')
+pacf(Differenced_Series,main='PACF for Differenced Series')
+
+#Step6:Fitting ARIMA Model
+Arima=auto.arima(Volume_Date_ARIMA,trace = TRUE,test="kpss",ic="aic") #Fits the model using approximation and no-approximation and picks the Best Model
+plot.ts(Arima$residuals) #Plots the Residual component of the ARIMA
+
+acf(Arima$residuals,lag.max=54)
+pacf(Arima$residuals,lag.max=54)
+
+Arima_Forecast = forecast(Arima, h=24) #Forecasts the model for 24 months
+Arima_Forecast
+plot(Arima_Forecast, xlab="Time") #Plots the forecast graph for the best model selected above by Auto_ARIMA
+
+```
